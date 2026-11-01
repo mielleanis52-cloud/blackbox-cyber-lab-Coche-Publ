@@ -38,93 +38,336 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;pa
 <p class="foot">BLACKBOX CYBER LAB · Ne partage jamais ton mot de passe. Cette maquette nécessite une configuration Supabase avant toute utilisation réelle.</p>
 </main>
 <script type="module">
+
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-// 1) Remplace ces deux valeurs par celles du projet Supabase (Project Settings > API).
+
 const SUPABASE_URL = 'https://eywdcicxjupkxbczdshr.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_WMB8dbUQOPAkJllfvg5Hjw_SrT-TaLd';
-const configured = SUPABASE_URL.startsWith('https://') && !SUPABASE_URL.includes('YOUR_PROJECT') && SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY';
-const supabase = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+// Identifiant du compte créateur
+const CREATOR_ID = 'ca1713d0-cc31-463a-ba79-86cba0366fee';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const $ = id => document.getElementById(id);
-let currentUser = null, isCreator = false, activeConversation = null, refreshChannel = null;
-function status(id,msg,isError=false){$(id).textContent=msg;$(id).style.color=isError?'#ff9aaa':''}
-function fmtTime(s){return new Date(s).toLocaleString('fr-FR',{dateStyle:'short',timeStyle:'short'})}
-function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function auth(action){
- if(!supabase){status('authStatus','Configuration requise : renseigne l’URL et la clé publique Supabase dans le fichier.',true);return}
- const email=$('email').value.trim(), password=$('password').value;
- if(!email||!password){status('authStatus','Saisis ton adresse e-mail et ton mot de passe.',true);return}
- status('authStatus','Connexion en cours…');
- const result=action==='signup'?await supabase.auth.signUp({email,password}):await supabase.auth.signInWithPassword({email,password});
- if(result.error){status('authStatus',result.error.message,true);return}
- if(action==='signup'&&!result.data.session){status('authStatus','Compte créé. Vérifie ton e-mail pour confirmer ton inscription.');return}
- status('authStatus',action==='signup'?'Compte créé.':'Connecté !');
- await loadSession();
+
+let currentUser = null;
+let isCreator = false;
+let activeConversation = null;
+
+function status(id, msg, isError = false) {
+  $(id).textContent = msg;
+  $(id).style.color = isError ? '#ff9aaa' : '';
 }
-$('loginBtn').onclick=()=>auth('login');$('signupBtn').onclick=()=>auth('signup');
-$('signOutBtn').onclick=async()=>{if(supabase)await supabase.auth.signOut();currentUser=null;isCreator=false;$('messaging').classList.add('hidden');$('signOutBtn').classList.add('hidden');$('accountLabel').textContent='Non connecté';status('authStatus','Déconnecté.')};
-async function loadSession(){
- if(!supabase)return;
- const {data:{user}}=await supabase.auth.getUser();currentUser=user;
- if(!user){$('messaging').classList.add('hidden');$('accountLabel').textContent='Non connecté';$('signOutBtn').classList.add('hidden');return}
- $('accountLabel').textContent=user.email||'Compte connecté';$('signOutBtn').classList.remove('hidden');$('messaging').classList.remove('hidden');
- const role=await supabase.from('user_roles').select('role').eq('user_id',user.id).maybeSingle();
- if(role.error){status('chatStatus','Impossible de vérifier les autorisations. Vérifie les politiques SQL.',true);return}
- isCreator=role.data?.role==='creator';
- $('roleLabel').textContent=isCreator?'ESPACE CRÉATEUR · CONFIDENTIEL':'MESSAGERIE PRIVÉE';
- $('chatTitle').textContent=isCreator?'Boîte de réception du créateur':'Discussion avec le créateur';
- $('chatIntro').textContent=isCreator?'Toutes les conversations privées. Seul le compte créateur possède cet accès.':'Tu vois uniquement tes propres messages et les réponses du créateur.';
- await loadConversations();
+
+function fmtTime(s) {
+  return new Date(s).toLocaleString('fr-FR', {
+    dateStyle: 'short',
+    timeStyle: 'short'
+  });
 }
-async function loadConversations(){
- const q=supabase.from('conversations').select('id,visitor_id,updated_at').order('updated_at',{ascending:false});
- const {data,error}=await q;
- if(error){status('chatStatus','Erreur de chargement : '+error.message,true);return}
- const list=$('threadList');list.innerHTML='';
- if(!data?.length){list.innerHTML='<div class="empty">Aucune conversation pour le moment.</div>';activeConversation=null;renderMessages([]);return}
- data.forEach((c,i)=>{const b=document.createElement('button');b.className='thread'+((activeConversation===c.id||(!activeConversation&&i===0))?' active':'');b.innerHTML=isCreator?`<b>Visiteur · ${safe(c.visitor_id.slice(0,8))}</b><small>${fmtTime(c.updated_at)}</small>`:`<b>Ma conversation</b><small>${fmtTime(c.updated_at)}</small>`;b.onclick=()=>selectConversation(c.id);list.appendChild(b)});
- if(!activeConversation||!data.some(c=>c.id===activeConversation))activeConversation=data[0].id;
- await selectConversation(activeConversation);
+
+function safe(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;',
+    '"': '&quot;', "'": '&#39;'
+  }[c]));
 }
-async function selectConversation(id){
- activeConversation=id;
- [...$('threadList').children].forEach((b)=>b.classList.toggle('active',b.textContent.includes(isCreator?'Visiteur':'Ma conversation')&&false));
- const {data,error}=await supabase.from('messages').select('id,sender_id,body,created_at').eq('conversation_id',id).order('created_at',{ascending:true});
- if(error){status('chatStatus','Erreur de lecture : '+error.message,true);return}
- renderMessages(data||[]);
-}
-function renderMessages(rows){
- const box=$('messages');box.innerHTML='';
- if(!rows.length){box.innerHTML='<div class="empty">Aucun message. Tu peux commencer la conversation ici.</div>';return}
- rows.forEach(m=>{const d=document.createElement('div');d.className='bubble'+(m.sender_id===currentUser?.id?' mine':'');d.textContent=m.body;const sm=document.createElement('small');sm.textContent=(m.sender_id===currentUser?.id?'Moi':'Créateur / visiteur')+' · '+fmtTime(m.created_at);d.appendChild(sm);box.appendChild(d)});box.scrollTop=box.scrollHeight;
-}
-$('sendForm').addEventListener('submit',async e=>{
- e.preventDefault();if(!supabase||!currentUser)return;
- const body=$('messageInput').value.trim();if(!body)return;
- $('sendBtn').disabled=true;status('chatStatus','Envoi…');
- try{
-  if(!activeConversation){
-   if(isCreator){status('chatStatus','Sélectionne une conversation pour répondre.',true);return}
-   const {data:creator,error:ce}=await supabase.rpc('get_blackbox_creator_id');
-   if(ce||!creator){status('chatStatus','Le compte créateur n’est pas encore configuré.',true);return}
-   const {data:conv,error:ve}=await supabase.from('conversations').insert({visitor_id:currentUser.id,creator_id:creator}).select('id').single();
-   if(ve){status('chatStatus',ve.message,true);return}activeConversation=conv.id;
+
+async function auth(action) {
+  const email = $('email').value.trim();
+  const password = $('password').value;
+
+  if (!email || !password) {
+    status('authStatus', 'Saisis ton adresse e-mail et ton mot de passe.', true);
+    return;
   }
-  const {error}=await supabase.from('messages').insert({conversation_id:activeConversation,sender_id:currentUser.id,body});
-  if(error){status('chatStatus',error.message,true);return}
-  $('messageInput').value='';status('chatStatus','Message envoyé.');await loadConversations();
- }finally{$('sendBtn').disabled=false}
-});
-if(supabase){
- supabase.auth.onAuthStateChange(()=>{setTimeout(loadSession,0)});
- await loadSession();
+
+  status('authStatus', 'Connexion en cours…');
+
+  const result = action === 'signup'
+    ? await supabase.auth.signUp({ email, password })
+    : await supabase.auth.signInWithPassword({ email, password });
+
+  if (result.error) {
+    status('authStatus', result.error.message, true);
+    return;
+  }
+
+  if (action === 'signup' && !result.data.session) {
+    status('authStatus', 'Compte créé. Vérifie ton e-mail pour confirmer ton inscription.');
+    return;
+  }
+
+  status('authStatus', 'Connecté !');
+  await loadSession();
 }
-$('fakeCardBtn').onclick=()=>{const digits='0000'+Array.from({length:12},()=>Math.floor(Math.random()*10)).join('');const names=['Alex Martin','Camille Durand','Noah Petit','Lina Moreau'];const mm=String(1+Math.floor(Math.random()*12)).padStart(2,'0');const yy=String(new Date().getFullYear()+1+Math.floor(Math.random()*5)).slice(-2);$('fakeCardResult').innerHTML=`<b>${digits}</b><br>${names[Math.floor(Math.random()*names.length)]} · ${mm}/${yy} · CVC ${String(Math.floor(Math.random()*900)+100)}<br><small>Numéro volontairement invalide et non payable.</small>`};
-const audio=$('audio'),file=$('audioFile');
-file.onchange=()=>{const f=file.files?.[0];if(!f)return;audio.src=URL.createObjectURL(f);$('trackName').textContent=f.name;$('playBtn').disabled=$('backBtn').disabled=$('forwardBtn').disabled=$('seek').disabled=false;audio.load()};
-$('playBtn').onclick=async()=>{if(audio.paused){try{await audio.play()}catch(e){}}else audio.pause()};
-$('backBtn').onclick=()=>audio.currentTime=Math.max(0,audio.currentTime-10);$('forwardBtn').onclick=()=>audio.currentTime=Math.min(audio.duration||0,audio.currentTime+10);
-audio.onplay=()=>$('playBtn').textContent='Ⅱ Pause';audio.onpause=()=>$('playBtn').textContent='▶ Lire';
-audio.ontimeupdate=()=>{const t=audio.currentTime,d=audio.duration||0;$('seek').value=d?t/d*100:0;$('timeLabel').textContent=`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')} / ${Math.floor(d/60)}:${String(Math.floor(d%60)).padStart(2,'0')}`};
-$('seek').oninput=()=>{if(audio.duration)audio.currentTime=audio.duration*Number($('seek').value)/100};
+
+$('loginBtn').onclick = () => auth('login');
+$('signupBtn').onclick = () => auth('signup');
+
+$('signOutBtn').onclick = async () => {
+  await supabase.auth.signOut();
+  currentUser = null;
+  isCreator = false;
+  activeConversation = null;
+  $('messaging').classList.add('hidden');
+  $('signOutBtn').classList.add('hidden');
+  $('accountLabel').textContent = 'Non connecté';
+  status('authStatus', 'Déconnecté.');
+};
+
+async function loadSession() {
+  const { data, error } = await supabase.auth.getUser();
+
+  if (error) {
+    status('authStatus', error.message, true);
+    return;
+  }
+
+  currentUser = data.user;
+
+  if (!currentUser) {
+    $('messaging').classList.add('hidden');
+    $('accountLabel').textContent = 'Non connecté';
+    $('signOutBtn').classList.add('hidden');
+    return;
+  }
+
+  isCreator = currentUser.id === CREATOR_ID;
+
+  $('accountLabel').textContent = currentUser.email || 'Compte connecté';
+  $('signOutBtn').classList.remove('hidden');
+  $('messaging').classList.remove('hidden');
+
+  $('roleLabel').textContent = isCreator
+    ? 'ESPACE CRÉATEUR · CONFIDENTIEL'
+    : 'MESSAGERIE PRIVÉE';
+
+  $('chatTitle').textContent = isCreator
+    ? 'Boîte de réception du créateur'
+    : 'Discussion avec le créateur';
+
+  $('chatIntro').textContent = isCreator
+    ? 'Toutes les conversations privées.'
+    : 'Tu vois uniquement tes propres messages et les réponses du créateur.';
+
+  await loadConversations();
+}
+
+async function loadConversations() {
+  const { data, error } = await supabase
+    .from('bb_conversations')
+    .select('id,visitor_id,subject,created_at')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    status('chatStatus', 'Erreur de chargement : ' + error.message, true);
+    return;
+  }
+
+  const list = $('threadList');
+  list.innerHTML = '';
+
+  if (!data || data.length === 0) {
+    list.innerHTML = '<div class="empty">Aucune conversation pour le moment.</div>';
+    activeConversation = null;
+    renderMessages([]);
+    return;
+  }
+
+  data.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'thread';
+
+    if (activeConversation === c.id || (!activeConversation && i === 0)) {
+      b.classList.add('active');
+    }
+
+    b.innerHTML = isCreator
+      ? `<b>Visiteur · ${safe(c.visitor_id.slice(0, 8))}</b><small>${fmtTime(c.created_at)}</small>`
+      : `<b>Ma conversation</b><small>${fmtTime(c.created_at)}</small>`;
+
+    b.onclick = () => selectConversation(c.id);
+    list.appendChild(b);
+  });
+
+  if (!activeConversation || !data.some(c => c.id === activeConversation)) {
+    activeConversation = data[0].id;
+  }
+
+  await selectConversation(activeConversation);
+}
+
+async function selectConversation(id) {
+  activeConversation = id;
+
+  const { data, error } = await supabase
+    .from('bb_messages')
+    .select('id,sender_id,body,created_at')
+    .eq('conversation_id', id)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    status('chatStatus', 'Erreur de lecture : ' + error.message, true);
+    return;
+  }
+
+  renderMessages(data || []);
+}
+
+function renderMessages(rows) {
+  const box = $('messages');
+  box.innerHTML = '';
+
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">Aucun message. Tu peux commencer la conversation ici.</div>';
+    return;
+  }
+
+  rows.forEach(m => {
+    const d = document.createElement('div');
+    d.className = 'bubble' + (m.sender_id === currentUser?.id ? ' mine' : '');
+    d.textContent = m.body;
+
+    const sm = document.createElement('small');
+    sm.textContent = (m.sender_id === currentUser?.id ? 'Moi' : 'Autre participant') + ' · ' + fmtTime(m.created_at);
+
+    d.appendChild(sm);
+    box.appendChild(d);
+  });
+
+  box.scrollTop = box.scrollHeight;
+}
+
+$('sendForm').addEventListener('submit', async e => {
+  e.preventDefault();
+
+  if (!currentUser) return;
+
+  const body = $('messageInput').value.trim();
+  if (!body) return;
+
+  $('sendBtn').disabled = true;
+  status('chatStatus', 'Envoi…');
+
+  try {
+    if (!activeConversation) {
+      if (isCreator) {
+        status('chatStatus', 'Sélectionne une conversation pour répondre.', true);
+        return;
+      }
+
+      const { data: conv, error: convError } = await supabase
+        .from('bb_conversations')
+        .insert({
+          visitor_id: currentUser.id,
+          subject: 'Discussion privée'
+        })
+        .select('id')
+        .single();
+
+      if (convError) {
+        status('chatStatus', convError.message, true);
+        return;
+      }
+
+      activeConversation = conv.id;
+    }
+
+    const { error } = await supabase
+      .from('bb_messages')
+      .insert({
+        conversation_id: activeConversation,
+        sender_id: currentUser.id,
+        body: body
+      });
+
+    if (error) {
+      status('chatStatus', error.message, true);
+      return;
+    }
+
+    $('messageInput').value = '';
+    status('chatStatus', 'Message envoyé !');
+    await loadConversations();
+
+  } finally {
+    $('sendBtn').disabled = false;
+  }
+});
+
+supabase.auth.onAuthStateChange(() => {
+  setTimeout(loadSession, 0);
+});
+
+await loadSession();
+
+// Générateur de données fictives non payables
+$('fakeCardBtn').onclick = () => {
+  const digits = '0000' + Array.from(
+    { length: 12 },
+    () => Math.floor(Math.random() * 10)
+  ).join('');
+
+  const names = ['Alex Martin', 'Camille Durand', 'Noah Petit', 'Lina Moreau'];
+  const mm = String(1 + Math.floor(Math.random() * 12)).padStart(2, '0');
+  const yy = String(new Date().getFullYear() + 1 + Math.floor(Math.random() * 5)).slice(-2);
+
+  $('fakeCardResult').innerHTML =
+    `<b>${digits}</b><br>${names[Math.floor(Math.random() * names.length)]} · ${mm}/${yy} · CVC ${String(Math.floor(Math.random() * 900) + 100)}<br><small>Numéro volontairement invalide et non payable.</small>`;
+};
+
+// Lecteur audio
+const audio = $('audio');
+const file = $('audioFile');
+
+file.onchange = () => {
+  const f = file.files?.[0];
+  if (!f) return;
+
+  audio.src = URL.createObjectURL(f);
+  $('trackName').textContent = f.name;
+  $('playBtn').disabled = false;
+  $('backBtn').disabled = false;
+  $('forwardBtn').disabled = false;
+  $('seek').disabled = false;
+  audio.load();
+};
+
+$('playBtn').onclick = async () => {
+  if (audio.paused) {
+    try { await audio.play(); } catch (e) {}
+  } else {
+    audio.pause();
+  }
+};
+
+$('backBtn').onclick = () => {
+  audio.currentTime = Math.max(0, audio.currentTime - 10);
+};
+
+$('forwardBtn').onclick = () => {
+  audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 10);
+};
+
+audio.onplay = () => $('playBtn').textContent = 'Ⅱ Pause';
+audio.onpause = () => $('playBtn').textContent = '▶ Lire';
+
+audio.ontimeupdate = () => {
+  const t = audio.currentTime;
+  const d = audio.duration || 0;
+
+  $('seek').value = d ? t / d * 100 : 0;
+
+  $('timeLabel').textContent =
+    `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')} / ${Math.floor(d / 60)}:${String(Math.floor(d % 60)).padStart(2, '0')}`;
+};
+
+$('seek').oninput = () => {
+  if (audio.duration) {
+    audio.currentTime = audio.duration * Number($('seek').value) / 100;
+  }
+};
+
 </script>
 </body></html>
